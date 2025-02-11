@@ -10,7 +10,6 @@ impl Hasher for StarknetPoseidonHasher {
     type Hash = [u8; 32];
 
     fn hash(data: &[u8]) -> Self::Hash {
-        // Oczekujemy, że data ma długość 64 bajtów (32 bajty na każdy element)
         assert!(data.len() == 64, "Expected 64 bytes of data");
 
         let left: [u8; 32] = data[..32].try_into().expect("slice with incorrect length");
@@ -145,6 +144,26 @@ impl Merkle {
 mod tests {
     use super::*;
 
+    fn combine_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+        let mut data = [0u8; 64];
+        data[..32].copy_from_slice(&left);
+        data[32..].copy_from_slice(&right);
+        StarknetPoseidonHasher::hash(&data)
+    }
+
+    fn reconstruct_root(leaf: [u8; 32], mut index: usize, proof: &[[u8; 32]]) -> [u8; 32] {
+        let mut hash = leaf;
+        for sibling in proof.iter() {
+            if index % 2 == 0 {
+                hash = combine_hash(hash, *sibling);
+            } else {
+                hash = combine_hash(*sibling, hash);
+            }
+            index /= 2;
+        }
+        hash
+    }
+
     #[test]
     fn test_empty_tree_root() {
         let merkle = Merkle::new();
@@ -177,5 +196,43 @@ mod tests {
         let proof = merkle.get_proof(0);
 
         assert_eq!(proof.len(), TREE_DEPTH, "bad proof len");
+    }
+
+    #[test]
+    fn test_proof_verification() {
+        let mut merkle = Merkle::new();
+        let index = 7;
+        let leaf = Felt::from(42);
+        merkle.add_leaf(index, leaf);
+        let computed_root = merkle.get_root();
+        let proof = merkle.get_proof(index);
+
+        let reconstructed = reconstruct_root(leaf.to_bytes_be(), index, &proof);
+
+        assert_eq!(
+            reconstructed,
+            computed_root.to_bytes_be(),
+            "Proof verification failed: reconstructed root does not match computed root"
+        );
+    }
+
+    #[test]
+    fn test_proof_invalid_when_modified() {
+        let mut merkle = Merkle::new();
+        let index = 15;
+        let leaf = Felt::from(42);
+        merkle.add_leaf(index, leaf);
+        let computed_root = merkle.get_root();
+        let mut proof = merkle.get_proof(index);
+
+        proof[0][0] ^= 0xff;
+
+        let reconstructed = reconstruct_root(leaf.to_bytes_be(), index, &proof);
+
+        assert_ne!(
+            reconstructed,
+            computed_root.to_bytes_be(),
+            "Modified proof should not verify correctly"
+        );
     }
 }
