@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rs_merkle = "1.4.2"
+serde = { version = "1.0.217", features = ["derive"] }
+starknet-types-core = { version = "0.1.7", default-features = false, features = [
+    "hash",
+    "curve",
+] }
