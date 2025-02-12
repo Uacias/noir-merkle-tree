@@ -1,238 +1,223 @@
-use std::collections::HashMap;
+use starknet_types_core::{
+    felt::Felt,
+    hash::{Poseidon, StarkHash},
+};
 
-use rs_merkle::{Hasher, MerkleTree};
-use starknet_types_core::{felt::Felt, hash::StarkHash};
+use crate::helpers::precomputed_hashes;
 
-#[derive(Clone)]
-pub struct StarknetPoseidonHasher;
-
-impl Hasher for StarknetPoseidonHasher {
-    type Hash = [u8; 32];
-
-    fn hash(data: &[u8]) -> Self::Hash {
-        assert!(data.len() == 64, "Expected 64 bytes of data");
-
-        let left: [u8; 32] = data[..32].try_into().expect("slice with incorrect length");
-        let right: [u8; 32] = data[32..64]
-            .try_into()
-            .expect("slice with incorrect length");
-
-        let left_felt = Felt::from_bytes_be(&left);
-        let right_felt = Felt::from_bytes_be(&right);
-        let poseidon_hash = starknet_types_core::hash::Poseidon::hash(&left_felt, &right_felt);
-        poseidon_hash.to_bytes_be()
-    }
-}
-const TREE_DEPTH: usize = 12;
-
-const NULL_HASHES: [[u8; 32]; 13] = [
-    [
-        2, 147, 211, 232, 168, 15, 64, 13, 170, 175, 253, 213, 147, 46, 43, 204, 136, 20, 186, 184,
-        244, 20, 167, 93, 202, 207, 135, 49, 143, 139, 20, 197,
-    ],
-    [
-        2, 150, 236, 72, 57, 103, 173, 63, 190, 52, 7, 35, 61, 179, 120, 182, 40, 76, 193, 252,
-        199, 141, 98, 69, 123, 151, 164, 190, 103, 68, 173, 13,
-    ],
-    [
-        4, 18, 123, 232, 59, 66, 41, 111, 226, 143, 152, 248, 253, 218, 41, 185, 110, 34, 229, 217,
-        5, 1, 247, 211, 27, 132, 231, 41, 236, 47, 172, 63,
-    ],
-    [
-        3, 56, 131, 48, 90, 176, 223, 26, 183, 97, 1, 83, 87, 138, 77, 81, 11, 132, 88, 65, 184,
-        77, 144, 237, 153, 49, 51, 206, 76, 232, 248, 39,
-    ],
-    [
-        4, 14, 64, 147, 254, 90, 247, 59, 236, 246, 80, 127, 71, 90, 82, 154, 120, 228, 159, 96,
-        69, 57, 234, 95, 53, 71, 5, 155, 94, 127, 16, 118,
-    ],
-    [
-        5, 93, 172, 116, 55, 82, 122, 137, 182, 192, 62, 203, 113, 65, 25, 62, 48, 163, 143, 135,
-        50, 79, 61, 162, 47, 59, 140, 231, 65, 26, 136, 205,
-    ],
-    [
-        1, 236, 133, 154, 25, 202, 154, 184, 216, 102, 62, 184, 90, 9, 207, 185, 2, 50, 111, 193,
-        75, 58, 33, 33, 86, 158, 210, 132, 122, 156, 34, 191,
-    ],
-    [
-        7, 101, 225, 55, 205, 166, 104, 88, 48, 207, 20, 236, 82, 152, 244, 96, 151, 231, 138, 59,
-        224, 106, 161, 91, 236, 237, 144, 127, 26, 34, 217, 253,
-    ],
-    [
-        5, 210, 93, 107, 143, 17, 227, 69, 66, 204, 133, 4, 7, 137, 153, 38, 189, 97, 226, 83, 221,
-        119, 100, 119, 153, 97, 81, 246, 85, 79, 61, 161,
-    ],
-    [
-        4, 162, 19, 88, 195, 231, 84, 118, 98, 22, 180, 201, 62, 207, 174, 34, 46, 134, 130, 47,
-        116, 110, 112, 110, 86, 63, 58, 5, 239, 57, 137, 89,
-    ],
-    [
-        7, 84, 239, 66, 179, 227, 183, 77, 250, 114, 180, 211, 161, 210, 9, 228, 43, 177, 202, 151,
-        255, 44, 136, 255, 24, 85, 52, 95, 91, 53, 126, 72,
-    ],
-    [
-        2, 188, 177, 54, 170, 203, 219, 36, 176, 74, 241, 228, 187, 11, 63, 251, 180, 152, 251, 78,
-        24, 238, 208, 169, 234, 109, 103, 209, 227, 100, 72, 59,
-    ],
-    [
-        5, 33, 112, 145, 223, 236, 99, 240, 81, 51, 81, 160, 8, 32, 137, 111, 210, 234, 202, 101,
-        105, 8, 72, 55, 60, 249, 194, 132, 4, 128, 238, 127,
-    ],
-];
-
-pub struct Merkle {
-    tree: MerkleTree<StarknetPoseidonHasher>,
-    leaves: HashMap<usize, [u8; 32]>,
+/// HybridMerkleTree builds the tree dynamically only for added leaves.
+#[derive(Debug, Clone)]
+pub struct HybridMerkleTree {
+    height: usize,
+    precomputed: Vec<Felt>,
+    left_path: Vec<Felt>,
+    layers: Vec<Vec<Felt>>, // Each layer stores computed hashes.
+    free_index: usize,      // Number of leaves added.
 }
 
-impl Merkle {
-    pub fn new() -> Self {
-        let tree = MerkleTree::<StarknetPoseidonHasher>::new();
+impl HybridMerkleTree {
+    pub fn new(height: usize) -> Self {
+        let precomputed = precomputed_hashes(height);
+        let left_path = precomputed.clone();
+        let layers = vec![Vec::new(); height];
         Self {
-            tree,
-            leaves: HashMap::new(),
+            height,
+            precomputed,
+            left_path,
+            layers,
+            free_index: 0,
         }
     }
 
-    pub fn add_leaf(&mut self, index: usize, leaf: Felt) {
-        let leaf_bytes = leaf.to_bytes_be();
-        self.leaves.insert(index, leaf_bytes);
+    /// Adds a new leaf and updates only the affected path to the root.
+    pub fn add_leaf(&mut self, leaf: &Felt) {
+        let mut hash_val = leaf.clone();
+        let mut index = self.free_index;
+        self.free_index += 1;
+
+        // Add the leaf to layer 0.
+        self.layers[0].push(leaf.clone());
+
+        // Compute parent hashes up the tree.
+        for i in 1..self.height {
+            if index % 2 == 0 {
+                // For an even index, combine with the precomputed null value.
+                let combined = Poseidon::hash(&hash_val, &self.precomputed[i - 1]);
+                self.left_path[i - 1] = hash_val.clone();
+                hash_val = combined;
+            } else {
+                // For an odd index, combine with the left sibling from left_path.
+                hash_val = Poseidon::hash(&self.left_path[i - 1], &hash_val);
+            }
+            index /= 2;
+            if self.layers[i].len() > index {
+                self.layers[i][index] = hash_val.clone();
+            } else {
+                self.layers[i].push(hash_val.clone());
+            }
+        }
+        self.left_path[self.height - 1] = hash_val;
     }
 
-    pub fn get_root(&self) -> Felt {
-        let mut computed_tree = MerkleTree::<StarknetPoseidonHasher>::new();
-        let mut all_leaves = vec![NULL_HASHES[0]; 2usize.pow(TREE_DEPTH as u32)];
-
-        for (&index, &leaf) in &self.leaves {
-            all_leaves[index] = leaf;
-        }
-
-        computed_tree.append(&mut all_leaves);
-        computed_tree.commit();
-
-        let root = computed_tree.root().unwrap_or(NULL_HASHES[TREE_DEPTH]);
-
-        println!("Computed empty root: {:?}", computed_tree.root());
-        println!("Expected empty root: {:?}", NULL_HASHES[TREE_DEPTH]);
-
-        Felt::from_bytes_be(&root)
+    /// Returns the current tree root.
+    pub fn root(&self) -> Felt {
+        self.left_path[self.height - 1].clone()
     }
 
-    pub fn get_proof(&self, index: usize) -> Vec<[u8; 32]> {
-        let mut computed_tree = MerkleTree::<StarknetPoseidonHasher>::new();
-        let mut all_leaves = vec![NULL_HASHES[0]; 2usize.pow(TREE_DEPTH as u32)];
-
-        for (&index, &leaf) in &self.leaves {
-            all_leaves[index] = leaf;
+    /// Generates a proof (sibling hashes and side indicators) for a given leaf index.
+    /// The proof is returned as a tuple: (vector of sibling hashes, vector of booleans indicating if the sibling is on the right).
+    pub fn path(&self, mut index: usize) -> (Vec<Felt>, Vec<bool>) {
+        if index >= self.layers[0].len() {
+            panic!("Leaf does not exist!");
         }
-
-        computed_tree.append(&mut all_leaves);
-        computed_tree.commit();
-
-        let mut proof = computed_tree.proof(&[index]).proof_hashes().to_vec();
-
-        while proof.len() < TREE_DEPTH {
-            let null_level = proof.len();
-            proof.push(NULL_HASHES[null_level]);
+        let mut elements = Vec::new();
+        let mut indices = Vec::new();
+        // For each level (except the root level), retrieve the sibling from the corresponding layer.
+        for i in 0..(self.height - 1) {
+            let is_right = index % 2 == 1;
+            let sibling = if is_right {
+                // For a right child, the sibling is at index-1 in the same layer.
+                self.layers[i][index - 1].clone()
+            } else {
+                // For a left child, if the right sibling exists, use it; otherwise, use the precomputed null value.
+                if index + 1 < self.layers[i].len() {
+                    self.layers[i][index + 1].clone()
+                } else {
+                    self.precomputed[i].clone()
+                }
+            };
+            elements.push(sibling);
+            indices.push(is_right);
+            index /= 2;
         }
-
-        proof
+        (elements, indices)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn combine_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
-        let mut data = [0u8; 64];
-        data[..32].copy_from_slice(&left);
-        data[32..].copy_from_slice(&right);
-        StarknetPoseidonHasher::hash(&data)
-    }
-
-    fn reconstruct_root(leaf: [u8; 32], mut index: usize, proof: &[[u8; 32]]) -> [u8; 32] {
-        let mut hash = leaf;
-        for sibling in proof.iter() {
-            if index % 2 == 0 {
-                hash = combine_hash(hash, *sibling);
-            } else {
-                hash = combine_hash(*sibling, hash);
-            }
-            index /= 2;
-        }
-        hash
-    }
+    use crate::helpers::{compute_merkle_root_rust, precomputed_hashes};
 
     #[test]
-    fn test_empty_tree_root() {
-        let merkle = Merkle::new();
-        let computed_root = merkle.get_root();
-        let expected_root = Felt::from_bytes_be(&NULL_HASHES[TREE_DEPTH]);
+    fn test_hybrid_merkle_tree_root() {
+        let mut tree = HybridMerkleTree::new(3); // 3 levels for 4 leaves
+        let leaf0 = Felt::from(1);
+        let leaf1 = Felt::from(2);
+        let leaf2 = Felt::from(3);
+        let leaf3 = Felt::from(4);
+        tree.add_leaf(&leaf0);
+        tree.add_leaf(&leaf1);
+        tree.add_leaf(&leaf2);
+        tree.add_leaf(&leaf3);
 
-        assert_eq!(
-            computed_root, expected_root,
-            "invalid empty trie root! \ncomputed: {:?}\nexpected: {:?}",
-            computed_root, expected_root
-        );
-    }
-
-    #[test]
-    fn test_add_leaf_changes_root() {
-        let mut merkle = Merkle::new();
-        let old_root = merkle.get_root();
-
-        let leaf = Felt::from(42);
-        merkle.add_leaf(0, leaf);
-        let new_root = merkle.get_root();
-
-        assert_ne!(old_root, new_root, "Root the same after insert!");
-    }
-
-    #[test]
-    fn test_proof_length() {
-        let mut merkle = Merkle::new();
-        merkle.add_leaf(0, Felt::from(42));
-        let proof = merkle.get_proof(0);
-
-        assert_eq!(proof.len(), TREE_DEPTH, "bad proof len");
-    }
-
-    #[test]
-    fn test_proof_verification() {
-        let mut merkle = Merkle::new();
-        let index = 7;
-        let leaf = Felt::from(42);
-        merkle.add_leaf(index, leaf);
-        let computed_root = merkle.get_root();
-        let proof = merkle.get_proof(index);
-
-        let reconstructed = reconstruct_root(leaf.to_bytes_be(), index, &proof);
-
-        assert_eq!(
-            reconstructed,
-            computed_root.to_bytes_be(),
-            "Proof verification failed: reconstructed root does not match computed root"
-        );
-    }
-
-    #[test]
-    fn test_proof_invalid_when_modified() {
-        let mut merkle = Merkle::new();
-        let index = 15;
-        let leaf = Felt::from(42);
-        merkle.add_leaf(index, leaf);
-        let computed_root = merkle.get_root();
-        let mut proof = merkle.get_proof(index);
-
-        proof[0][0] ^= 0xff;
-
-        let reconstructed = reconstruct_root(leaf.to_bytes_be(), index, &proof);
-
+        let root = tree.root();
         assert_ne!(
-            reconstructed,
-            computed_root.to_bytes_be(),
-            "Modified proof should not verify correctly"
+            root,
+            precomputed_hashes(3)[2],
+            "Root should not be the default null value"
+        );
+    }
+
+    #[test]
+    fn test_compute_merkle_root_rust_simulation() {
+        let height = 3;
+        let mut tree = HybridMerkleTree::new(height);
+        let leaf0 = Felt::from(1);
+        let leaf1 = Felt::from(2);
+        let leaf2 = Felt::from(3);
+        let leaf3 = Felt::from(4);
+        tree.add_leaf(&leaf0);
+        tree.add_leaf(&leaf1);
+        tree.add_leaf(&leaf2);
+        tree.add_leaf(&leaf3);
+
+        let index = 0u32;
+        let (proof, _bits) = tree.path(index as usize);
+        let computed_root = compute_merkle_root_rust(leaf0.clone(), index, &proof);
+        let tree_root = tree.root();
+        assert_eq!(
+            computed_root, tree_root,
+            "Computed root from proof does not match tree root"
+        );
+    }
+
+    #[test]
+    fn test_high_depth_tree_memory() {
+        let height = 32;
+        let mut tree = HybridMerkleTree::new(height);
+        let num_leaves = 100;
+        for i in 0..num_leaves {
+            tree.add_leaf(&Felt::from(i as u32));
+        }
+        assert_eq!(tree.layers[0].len(), num_leaves);
+        for (i, layer) in tree.layers.iter().enumerate() {
+            let expected_max = ((num_leaves as f64) / (2.0f64.powi(i as i32))).ceil() as usize;
+            assert!(
+                layer.len() <= expected_max,
+                "Layer {} has {} elements, expected at most {}",
+                i,
+                layer.len(),
+                expected_max
+            );
+        }
+        assert_ne!(
+            tree.root(),
+            tree.precomputed[height - 1],
+            "Root should not be the default null value"
+        );
+    }
+
+    #[test]
+    fn test_compute_merkle_root_high_depth() {
+        let height = 32;
+        let mut tree = HybridMerkleTree::new(height);
+        let leaves: Vec<Felt> = (0..10).map(|i| Felt::from(i as u32 + 1)).collect();
+        for leaf in &leaves {
+            tree.add_leaf(leaf);
+        }
+        let index = 0u32;
+        let (proof, _bits) = tree.path(index as usize);
+        let computed_root = compute_merkle_root_rust(leaves[0].clone(), index, &proof);
+        let tree_root = tree.root();
+        assert_eq!(
+            computed_root, tree_root,
+            "Computed root from proof does not match tree root for high depth tree"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Leaf does not exist!")]
+    fn test_path_for_nonexistent_leaf() {
+        let tree = HybridMerkleTree::new(3);
+        let _ = tree.path(0);
+    }
+
+    #[test]
+    fn test_single_leaf_tree() {
+        let mut tree = HybridMerkleTree::new(3);
+        let leaf = Felt::from(42);
+        tree.add_leaf(&leaf);
+        let root = tree.root();
+        assert_ne!(
+            root, tree.precomputed[2],
+            "Root for single leaf should not be the default null value"
+        );
+    }
+
+    #[test]
+    fn test_path_consistency() {
+        let mut tree = HybridMerkleTree::new(3);
+        let leaf0 = Felt::from(1);
+        let leaf1 = Felt::from(2);
+        tree.add_leaf(&leaf0);
+        tree.add_leaf(&leaf1);
+        let (proof0, bits0) = tree.path(0);
+        let (proof1, bits1) = tree.path(1);
+        assert_ne!(proof0, proof1, "Proofs for different leaves should differ");
+        assert_ne!(
+            bits0, bits1,
+            "Proof bit patterns for different leaves should differ"
         );
     }
 }

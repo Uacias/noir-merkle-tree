@@ -19,4 +19,5 @@ fn main() {
     println!("const NULL_HASHES: [[u8; 32]; 13] = {:?};", null_hashes);
 }
 
+pub mod helpers;
 pub mod merkle;
